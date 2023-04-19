@@ -14,7 +14,6 @@
 # limitations under the License.
 """ Classes to support TF Vision-Encoder-Text-Decoder architectures"""
 
-
 import re
 import warnings
 from typing import Optional, Tuple, Union
@@ -37,7 +36,6 @@ from ...utils import (
 from ..auto.configuration_auto import AutoConfig
 from ..auto.modeling_tf_auto import TFAutoModel, TFAutoModelForCausalLM
 from .configuration_vision_encoder_decoder import VisionEncoderDecoderConfig
-
 
 logger = logging.get_logger(__name__)
 
@@ -644,7 +642,7 @@ class TFVisionEncoderDecoderModel(TFPreTrainedModel, TFCausalLanguageModelingLos
             start_index = sum([1 if x is not None else 0 for x in (loss, logits, past_key_values)])
 
             if not isinstance(encoder_outputs, tuple):
-                encoder_outputs = encoder_outputs.to_tuple()
+                encoder_outputs = (encoder_outputs,)
             output = (loss, logits, past_key_values) + decoder_outputs[start_index:] + encoder_outputs
             output = tuple([x for x in output if x is not None])
             return output
@@ -660,6 +658,56 @@ class TFVisionEncoderDecoderModel(TFPreTrainedModel, TFCausalLanguageModelingLos
             encoder_hidden_states=encoder_outputs.hidden_states,
             encoder_attentions=encoder_outputs.attentions,
         )
+
+    @tf.function(
+        input_signature=[
+            {
+                "pixel_values": tf.TensorSpec((None, None, None, None), tf.float32, name="pixel_values"),
+                "decoder_input_ids": tf.TensorSpec((None, None), tf.int32, name="decoder_input_ids"),
+            }
+        ]
+    )
+    def serving(self, inputs):
+        output = self.call(inputs)
+        return self.serving_output(output)
+
+    # @tf.function(
+    #     input_signature=[
+    #         {
+    #             "pixel_values": tf.TensorSpec((None, None, None, None), tf.float32, name="pixel_values"),
+    #         }
+    #     ]
+    # )
+    # def serving(self, inputs):
+    #     output = self.generate(inputs)
+    #     return output
+
+    @tf.function(
+        input_signature=[{"pixel_values": tf.TensorSpec((None, None, None, None), tf.float32, name="pixel_values")}]
+    )
+    def encoder_serving(self, inputs):
+        return self.encoder(inputs["pixel_values"]).last_hidden_state
+
+    @tf.function(
+        input_signature=[
+            {
+                "decoder_input_ids": tf.TensorSpec((None, None), tf.int32, name="decoder_input_ids"),
+                "encoder_outputs": tf.TensorSpec((None, None, None), tf.float32, name="encoder_outputs"),
+            }
+        ]
+    )
+    def decoder_serving(self, inputs):
+        model_inputs = {
+            "pixel_values": None,
+            "attention_mask": None,
+            "decoder_attention_mask": None,
+            "decoder_input_ids": inputs["decoder_input_ids"],
+            "encoder_outputs": (inputs["encoder_outputs"],),
+            "past_key_values": None,
+            "use_cache": True,
+        }
+        decoder_outs = self(**model_inputs, return_dict=False)
+        return decoder_outs[1]  # Extract logits
 
     def serving_output(self, output):
         pkv = tf.tuple(output.past_key_values)[1] if self.config.decoder.use_cache else None
